@@ -21,8 +21,11 @@ BACKEND = (_secrets.get("DB_BACKEND")
            or "sqlite").lower()
 
 # --------- Backend: Turso/libSQL ---------
+from libsql_client import create_client
+import asyncio
+
 def _normalize_url(u: str) -> str:
-    """Converte libsql:// / wss:// / ws:// para https:// (evita event loop)."""
+    """Converte libsql:// / wss:// / ws:// para https:// (modo HTTP síncrono)."""
     u = (u or "").strip()
     if u.startswith("libsql://"):
         return "https://" + u[len("libsql://"):]
@@ -32,38 +35,45 @@ def _normalize_url(u: str) -> str:
         return "https://" + u[len("ws://"):]
     return u
 
-if BACKEND == "libsql":
-    from libsql_client import create_client
+def _ensure_event_loop():
+    """Garante que exista um event loop ativo (necessário para aiohttp/libsql_client)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    @_cache
-    def _client():
-        raw_url = _secrets.get("LIBSQL_URL") or os.environ["LIBSQL_URL"]
-        url = _normalize_url(raw_url)  # força HTTP
-        token = _secrets.get("LIBSQL_AUTH_TOKEN", os.environ.get("LIBSQL_AUTH_TOKEN", ""))
-        return create_client(url=url, auth_token=token)
+@_cache
+def _client():
+    # 1) garante event loop
+    _ensure_event_loop()
 
-    def fetch_df(query, params=()):
-        res = _client().execute(query, params)
-        rows = getattr(res, "rows", []) or []
-        # Pode vir lista de dicts ou de tuplas:
-        if rows and isinstance(rows[0], dict):
-            return pd.DataFrame(rows)
-        cols = getattr(res, "columns", None)
-        return pd.DataFrame(rows, columns=cols)
+    # 2) força HTTP (evita WebSocket e problemas de loop)
+    raw_url = _secrets.get("LIBSQL_URL") or os.environ["LIBSQL_URL"]
+    url = _normalize_url(raw_url)               # ex.: https://gestaofrota-...turso.io
+    token = _secrets.get("LIBSQL_AUTH_TOKEN", os.environ.get("LIBSQL_AUTH_TOKEN", ""))
 
-    def execute(query, params=()):
-        _client().execute(query, params)
-        last_id = None
-        # Para INSERT com chave auto, tentamos buscar o last_insert_rowid da sessão
-        q0 = query.strip().lower()
-        if q0.startswith("insert"):
-            try:
-                r = _client().execute("SELECT last_insert_rowid() AS id")
-                if r.rows:
-                    last_id = r.rows[0]["id"] if isinstance(r.rows[0], dict) else r.rows[0][0]
-            except Exception:
-                pass
-        return last_id
+    return create_client(url=url, auth_token=token)
+
+def fetch_df(query, params=()):
+    res = _client().execute(query, params)
+    rows = getattr(res, "rows", []) or []
+    if rows and isinstance(rows[0], dict):
+        return pd.DataFrame(rows)
+    cols = getattr(res, "columns", None)
+    return pd.DataFrame(rows, columns=cols)
+
+def execute(query, params=()):
+    _client().execute(query, params)
+    last_id = None
+    if query.strip().lower().startswith("insert"):
+        try:
+            r = _client().execute("SELECT last_insert_rowid() AS id")
+            if r.rows:
+                last_id = r.rows[0]["id"] if isinstance(r.rows[0], dict) else r.rows[0][0]
+        except Exception:
+            pass
+    return last_id
 
 # --------- Backend: SQLite local (secrets/ENV não pedirem libsql) ---------
 else:
