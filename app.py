@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import date, datetime
 from db import init_db, fetch_df, execute, get_params, month_yyyymm
+init_db()
 
 
 # ---------- Utils ----------
