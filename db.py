@@ -1,16 +1,70 @@
+# db.py
+import os
 import sqlite3
-import pandas as pd
 from datetime import datetime
+import pandas as pd
+import streamlit as st
+
+# --- Dropbox SDK (opcionalmente com refresh token) ---
+DROPBOX_ENABLED = "dropbox" in st.secrets
+if DROPBOX_ENABLED:
+    import dropbox
+    if "refresh_token" in st.secrets["dropbox"]:
+        DBX = dropbox.Dropbox(
+            oauth2_refresh_token=st.secrets["dropbox"]["refresh_token"],
+            app_key=st.secrets["dropbox"]["app_key"],
+            app_secret=st.secrets["dropbox"]["app_secret"],
+        )
+    else:
+        DBX = dropbox.Dropbox(st.secrets["dropbox"]["access_token"])
+    DROPBOX_PATH = st.secrets["dropbox"].get("path", "/fleet.db")
 
 DB_PATH = "fleet.db"
 
+# ---------- helpers Dropbox ----------
+def _download_from_dropbox_if_exists():
+    if not DROPBOX_ENABLED:
+        return False
+    try:
+        md, res = DBX.files_download(DROPBOX_PATH)
+        with open(DB_PATH, "wb") as f:
+            f.write(res.content)
+        return True
+    except Exception as e:
+        # 404 ou outro erro => ignora (primeira execução pode não ter arquivo remoto)
+        return False
+
+def _upload_to_dropbox():
+    if not DROPBOX_ENABLED or not os.path.exists(DB_PATH):
+        return
+    with open(DB_PATH, "rb") as f:
+        data = f.read()
+    mode = dropbox.files.WriteMode("overwrite")
+    try:
+        DBX.files_upload(data, DROPBOX_PATH, mode=mode, mute=True)
+    except Exception as e:
+        # Mostra um aviso leve no app, mas não quebra a experiência
+        st.warning("Falha ao enviar banco ao Dropbox. Tente novamente.")
+
+def ensure_local_db_is_restored():
+    """Se não houver DB local, tenta restaurar do Dropbox."""
+    if os.path.exists(DB_PATH):
+        return
+    _download_from_dropbox_if_exists()
+
+# ---------- SQLite ----------
 def get_conn():
+    # SQLite local (rápido); persistência via Dropbox
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
+    # 1) restaurar do Dropbox (se existir) antes de criar tabelas
+    ensure_local_db_is_restored()
+
     conn = get_conn()
     cur = conn.cursor()
-    # Parâmetros dinâmicos
+
+    # Parâmetros
     cur.execute("""
     CREATE TABLE IF NOT EXISTS parameters (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,6 +72,7 @@ def init_db():
         value TEXT NOT NULL
     );
     """)
+
     # Veículos
     cur.execute("""
     CREATE TABLE IF NOT EXISTS vehicles (
@@ -31,36 +86,34 @@ def init_db():
         notes TEXT
     );
     """)
+
     # Motoristas
     cur.execute("""
     CREATE TABLE IF NOT EXISTS drivers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        cnh TEXT,
-        cnh_category TEXT,
-        cnh_expiry TEXT,
-        phone TEXT,
+        name TEXT,
+        license TEXT,
+        salary REAL,
+        status TEXT,
         notes TEXT
     );
     """)
+
     # Abastecimentos
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS fuels (
+    CREATE TABLE IF NOT EXISTS fuelings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
         plate TEXT,
-        driver_id INTEGER,
-        station TEXT,
         liters REAL,
-        unit_price REAL,
+        price_per_l REAL,
         total REAL,
-        odometer REAL,
-        payment TEXT,
+        station TEXT,
         notes TEXT,
-        FOREIGN KEY(plate) REFERENCES vehicles(plate),
-        FOREIGN KEY(driver_id) REFERENCES drivers(id)
+        FOREIGN KEY(plate) REFERENCES vehicles(plate)
     );
     """)
+
     # Viagens
     cur.execute("""
     CREATE TABLE IF NOT EXISTS trips (
@@ -68,6 +121,7 @@ def init_db():
         date TEXT,
         plate TEXT,
         driver_id INTEGER,
+        freight_value REAL,
         origin TEXT,
         destination TEXT,
         km_start REAL,
@@ -80,84 +134,41 @@ def init_db():
         FOREIGN KEY(driver_id) REFERENCES drivers(id)
     );
     """)
+
     # Manutenções
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS maintenance (
+    CREATE TABLE IF NOT EXISTS maints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
         plate TEXT,
-        mtype TEXT,
-        description TEXT,
-        supplier TEXT,
-        odometer REAL,
+        type TEXT,
         cost REAL,
-        next_km REAL,
-        next_date TEXT,
         notes TEXT,
         FOREIGN KEY(plate) REFERENCES vehicles(plate)
     );
     """)
-    # Outros custos
+
+    # Custos
     cur.execute("""
     CREATE TABLE IF NOT EXISTS costs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
+        category TEXT,
         plate TEXT,
-        ctype TEXT,
-        description TEXT,
+        driver_id INTEGER,
         amount REAL,
         notes TEXT,
-        FOREIGN KEY(plate) REFERENCES vehicles(plate)
+        FOREIGN KEY(plate) REFERENCES vehicles(plate),
+        FOREIGN KEY(driver_id) REFERENCES drivers(id)
     );
     """)
+
     conn.commit()
-
-    # Garantir coluna color em vehicles
-    try:
-        cur.execute("ALTER TABLE vehicles ADD COLUMN color TEXT")
-    except Exception:
-        pass
-
-
-    # Garantir coluna revenue em trips
-    try:
-        cur.execute("ALTER TABLE trips ADD COLUMN revenue REAL DEFAULT 0")
-    except Exception:
-        pass
-
-
-    # Garantir coluna nfe em trips
-    try:
-        cur.execute("ALTER TABLE trips ADD COLUMN nfe TEXT")
-    except Exception:
-        pass
-
-
-    # Garantir coluna driver_id em costs
-    try:
-        cur.execute("ALTER TABLE costs ADD COLUMN driver_id INTEGER")
-    except Exception:
-        pass
-
-    # Seed básico de parâmetros se estiver vazio
-    cur.execute("SELECT COUNT(*) FROM parameters")
-    if cur.fetchone()[0] == 0:
-        defaults = {
-            "Tipos_Manutencao": ["Revisão", "Troca de Óleo", "Pneus", "Freios", "Suspensão", "Elétrica", "Motor", "Outros"],
-            "Tipos_Custo": ["Combustível", "Manutenção", "Pedágio", "Seguro", "IPVA", "Licenciamento", "Multa", "Outros"],
-            "Combustiveis": ["Gasolina", "Etanol", "Diesel", "GNV", "Flex"],
-            "Status_Veiculo": ["Ativo", "Inativo", "Em manutenção", "Reservado"],
-            "Postos": ["Posto A", "Posto B", "Posto C"],
-            "Fornecedores": ["Oficina X", "Oficina Y", "Autopeças Z", "Concessionária"],
-            "Formas_Pagamento": ["Dinheiro", "Cartão", "PIX", "Boleto", "Frota"]
-        }
-        for cat, items in defaults.items():
-            cur.executemany(
-                "INSERT INTO parameters (category, value) VALUES (?,?)",
-                [(cat, v) for v in items]
-            )
-        conn.commit()
     conn.close()
+
+    # 2) garante que há cópia inicial no Dropbox
+    if DROPBOX_ENABLED:
+        _upload_to_dropbox()
 
 def fetch_df(query, params=()):
     conn = get_conn()
@@ -166,22 +177,38 @@ def fetch_df(query, params=()):
     return df
 
 def execute(query, params=()):
+    """INSERT/UPDATE/DELETE unitários; sincroniza após commit."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(query, params)
     conn.commit()
-    last_id = cur.lastrowid
     conn.close()
-    return last_id
+    if DROPBOX_ENABLED:
+        _upload_to_dropbox()
+
+def insert_many(table, rows):
+    """Inserção em lote; sincroniza ao final."""
+    if not rows:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cols = list(rows[0].keys())
+    placeholders = ",".join(["?"] * len(cols))
+    sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders})"
+    cur.executemany(sql, [tuple(r[c] for c in cols) for r in rows])
+    conn.commit()
+    conn.close()
+    if DROPBOX_ENABLED:
+        _upload_to_dropbox()
 
 def get_params(category):
     df = fetch_df("SELECT value FROM parameters WHERE category=? ORDER BY value ASC", (category,))
     return df["value"].tolist()
 
 def month_yyyymm(date_str):
-    # date_str em ISO ou dd/mm/yyyy
     try:
         dt = datetime.fromisoformat(date_str)
     except ValueError:
-        dt = datetime.strptime(date_str, "%d/%m/%Y")
+        from datetime import datetime as _dt
+        dt = _dt.strptime(date_str, "%d/%m/%Y")
     return dt.strftime("%Y-%m")
