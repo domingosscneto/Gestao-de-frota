@@ -163,7 +163,6 @@ def filter_table(df, key_prefix="flt", num_cols=4):
 st.set_page_config(page_title="Gestão de Frota", layout="wide")
 
 # ---------- Init DB ----------
-init_db()
 
 st.title("🚚 Gestão de Frota")
 
