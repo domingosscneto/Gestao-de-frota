@@ -596,14 +596,13 @@ elif page == "Custos":
 elif page == "Parâmetros":
     st.subheader("Parâmetros do Sistema")
     categories = [
-        "Tipos_Manutencao",
         "Tipos_Custo",
         "Combustiveis",
         "Status_Veiculo",
         "Postos",
-        "Fornecedores",
-        "Formas_Pagamento"
+        "Formas_Pagamento",
     ]
+    
     cat = st.selectbox("Categoria", categories)
 
     with st.form("frm_param", clear_on_submit=True):
