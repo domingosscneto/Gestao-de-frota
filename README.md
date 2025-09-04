@@ -29,7 +29,6 @@ Para **não perder dados** no Streamlit Cloud (onde o disco é temporário), o p
 - **Banco local**: `SQLite` em arquivo (`fleet.db`).
 - **Persistência em nuvem**: **Dropbox** (upload/download do `fleet.db`).
 - **Camada de acesso a dados**: `db.py` (funções `init_db`, `fetch_df`, `execute`, etc.).
-- **Padrão de datas**: salva no banco em **YYYY-MM-DD** (ISO) e exibe **DD/MM/AAAA** na interface.
 
 **Fluxo de persistência**:
 1. O app inicia → `init_db()` tenta **restaurar** o `fleet.db` do Dropbox.
